@@ -27,7 +27,10 @@ from . import ems_grpc_pb2
 from . import json_format
 from . import ems_grpc_pb2
 from . import telemetry_pb2
-from grpc.beta import implementations
+from . import gnmi_pb2
+from . import gnmi_pb2_grpc
+
+#from grpc.beta import implementations
 
 class CiscoGRPCClient(object):
     """This class creates grpc calls using python.
@@ -48,18 +51,19 @@ class CiscoGRPCClient(object):
             :type creds: str
             :type options: str
         """
+
         if creds != None:
             self._target = '%s:%d' % (host, port)
-            self._creds = implementations.ssl_channel_credentials(creds)
+            self._creds = grpc.ssl_channel_credentials(creds)
             self._options = options
-            channel = grpc.secure_channel(
+            self._channel = grpc.secure_channel(
                 self._target, self._creds, (('grpc.ssl_target_name_override', self._options,),))
-            self._channel = implementations.Channel(channel)
+            #self._channel = grpc.Channel(channel)
         else:
             self._host = host
             self._port = port
-            self._channel = implementations.insecure_channel(self._host, self._port)
-        self._stub = ems_grpc_pb2.beta_create_gRPCConfigOper_stub(self._channel)
+            self._channel = grpc.insecure_channel(self._host, self._port)
+        self._stub = ems_grpc_pb2.gRPCConfigOperStub(self._channel)
         self._timeout = float(timeout)
         self._metadata = [('username', user), ('password', password)]
 
@@ -72,6 +76,32 @@ class CiscoGRPCClient(object):
             self._metadata[1][1],
             self._timeout
         )
+
+    def getgnmicapability(self):
+        message = gnmi_pb2.CapabilityRequest()
+        gnmistub = gnmi_pb2_grpc.gNMIStub(self._channel)
+        responses = gnmistub.Capabilities(message, metadata=self._metadata)
+        return responses
+
+    def gnmisubscribe(self, subs, interval_seconds):
+	subscriptions = []
+	interval = interval_seconds * 1000000000 # convert to ns
+	for sub in subs:
+		pathelems = []
+		for pathlevel in sub.split("/"):
+			pathelems.append(gnmi_pb2.PathElem(name=pathlevel))
+		path = gnmi_pb2.Path(elem=pathelems)
+		subscriptions.append(gnmi_pb2.Subscription(path=path, sample_interval=interval, mode="SAMPLE"))
+
+
+	sublist = gnmi_pb2.SubscriptionList(subscription=subscriptions,encoding=2)
+	subreq = [gnmi_pb2.SubscribeRequest(subscribe=sublist)]
+        gnmistub = gnmi_pb2_grpc.gNMIStub(self._channel)
+	stream = gnmistub.Subscribe(subreq,metadata=self._metadata)
+	for unit in stream:
+		yield unit
+
+
 
     def getconfig(self, path):
         """Get grpc call
@@ -106,6 +136,33 @@ class CiscoGRPCClient(object):
                 telemetry_pb.ParseFromString(segment.data)
                 # Return in JSON format instead of protobuf.
                 yield json_format.MessageToJson(telemetry_pb)
+
+    def flattencisco(self, telemetry_segment):
+        telemetry_pb = telemetry_pb2.Telemetry()
+        telemetry_pb.ParseFromString(telemetry_segment.data)
+
+	def evenflatter(fields, basepath):
+		listname = ""
+		for rfield in fields:
+			if not rfield.fields:
+				print basepath + "/" + rfield.name
+			else:
+				if rfield.name=="keys" or rfield.name=="content":
+					listname = ""
+					evenflatter(rfield.fields, basepath + listname)
+				else:
+					listname = "/" + rfield.name
+					evenflatter(rfield.fields, basepath + listname)
+
+	#print telemetry_pb
+	for teldata in telemetry_pb.data_gpbkv:
+		print teldata.fields
+		evenflatter(teldata.fields, telemetry_pb.encoding_path)
+#		if teldata.fields is not None:
+#			print teldata.name
+#			for x in teldata.fields:
+#				print x.name
+
 
 
     def connectivityhandler(self, callback):
